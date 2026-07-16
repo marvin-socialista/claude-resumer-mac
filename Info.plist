@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
+    <key>CFBundleDisplayName</key><string>Claude Resumer</string>
+    <key>CFBundleExecutable</key><string>Claude Resumer</string>
+    <key>CFBundleIdentifier</key><string>nl.marvin.claude-resumer</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleName</key><string>Claude Resumer</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key><string>Claude Resumer Activation</string>
+            <key>CFBundleURLSchemes</key>
+            <array><string>claude-resumer</string></array>
+        </dict>
+    </array>
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>en</string>
+        <string>nl</string>
+        <string>es</string>
+        <string>fr</string>
+        <string>de</string>
+        <string>pt</string>
+        <string>zh-Hans</string>
+        <string>ru</string>
+    </array>
+    <key>CFBundleShortVersionString</key><string>1.7.1</string>
+    <key>CFBundleVersion</key><string>12</string>
+    <key>LicensingEnabled</key><false/>
+    <key>LicenseServerURL</key><string></string>
+    <key>PurchaseURL</key><string></string>
+    <key>SUFeedURL</key><string>https://clauderesumer.com/downloads/appcast.xml</string>
+    <key>SUPublicEDKey</key><string>y5VXtM6q84wEQm6f4ZxdiHUhmAVGBSPJaHWfvRATArg=</string>
+    <key>SUEnableAutomaticChecks</key><true/>
+    <key>SUScheduledCheckInterval</key><integer>86400</integer>
+    <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
+    <key>LSMinimumSystemVersion</key><string>13.0</string>
+    <key>NSDocumentsFolderUsageDescription</key><string>Claude Resumer heeft toegang tot je projectmappen nodig om Claude Code-sessies te hervatten.</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSPrincipalClass</key><string>NSApplication</string>
+</dict>
+</plist>

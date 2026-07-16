@@ -1,0 +1,10 @@
+# Build output
+build/
+*.app
+*.dmg
+
+# Vendored dependencies
+vendor/
+
+# macOS
+.DS_Store
