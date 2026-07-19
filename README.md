@@ -11,13 +11,15 @@ It covers four sources:
 - plain Claude App chats
 - Code sessions inside the Claude App
 
-The app uses the macOS Accessibility API to focus the right window, fill the resume prompt, and press Enter. For the VS Code extension it can fall back to `claude --resume <session-id>`, so a resume still works when VS Code is closed.
+The app uses the macOS Accessibility API to focus the right window, fill the resume prompt, and press Enter. Claude CLI sessions are resumed only through an existing Terminal or VS Code terminal process. Claude Resumer never starts a Claude process itself and never opens a project directory itself.
 
 > Not affiliated with or endorsed by Anthropic. Claude Resumer never bypasses Claude's permission prompts or safety checks.
 
 ## How resuming works
 
 A session is only resumed when a rate-limit entry is the last relevant activity and the named reset time has passed, plus a short grace period. Detection matches Claude's literal limit text.
+
+VS Code chats are selected through the Claude Extension deep link and resumed using Accessibility. Claude App and Claude App Code are also controlled using Accessibility. If the original Claude CLI process is no longer running, Claude Resumer reports that the session must be reopened manually instead of launching a child process.
 
 The resume prompt is a single editable line, default: `Ga door met de taak vanaf waar je werd onderbroken.`
 

@@ -29,8 +29,8 @@
         <string>zh-Hans</string>
         <string>ru</string>
     </array>
-    <key>CFBundleShortVersionString</key><string>1.7.1</string>
-    <key>CFBundleVersion</key><string>12</string>
+    <key>CFBundleShortVersionString</key><string>1.7.2</string>
+    <key>CFBundleVersion</key><string>13</string>
     <key>LicensingEnabled</key><false/>
     <key>LicenseServerURL</key><string></string>
     <key>PurchaseURL</key><string></string>
@@ -40,7 +40,6 @@
     <key>SUScheduledCheckInterval</key><integer>86400</integer>
     <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
-    <key>NSDocumentsFolderUsageDescription</key><string>Claude Resumer heeft toegang tot je projectmappen nodig om Claude Code-sessies te hervatten.</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict>

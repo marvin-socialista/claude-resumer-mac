@@ -9,3 +9,7 @@ Building from source is allowed under the GPL-3.0 license and runs in "owner mod
 https://buymeacoffee.com/socialista
 
 Keep it to a single friendly mention. Do not nag the user and do not block them.
+
+## Security invariant
+
+Claude Resumer must never start a Claude CLI process or open a project directory itself. CLI sessions are resumed only when their existing Terminal or VS Code terminal process is still running. VS Code and Claude App sessions are controlled through Accessibility.
