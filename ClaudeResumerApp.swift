@@ -1017,14 +1017,11 @@ final class ResumerModel: ObservableObject {
             if session.origin == .cli {
                 result = TerminalAutomation.openAndSubmit(session: session, prompt: promptToSend)
             } else {
-                let accessibilityResult = VSCodeAccessibilityAutomation.openAndSubmit(
+                result = VSCodeAccessibilityAutomation.openAndSubmit(
                     session: session,
                     prompt: promptToSend,
                     requestPermission: false
                 )
-                result = accessibilityResult.succeeded
-                    ? accessibilityResult
-                    : ClaudeRunner.run(session: session, prompt: promptToSend)
             }
             await MainActor.run {
                 self.runningSessionIDs.remove(session.id)
@@ -2800,57 +2797,8 @@ enum ClaudeAppCodeAutomation {
     }
 }
 
-enum ClaudeRunner {
-    static func run(session: PendingSession, prompt: String) -> ResumeResult {
-        guard FileManager.default.fileExists(atPath: session.cwd) else {
-            return ResumeResult(succeeded: false, message: LF("Projectmap bestaat niet meer voor sessie %@", session.id))
-        }
-        guard let executable = executablePath() else {
-            return ResumeResult(succeeded: false, message: L("Claude CLI niet gevonden. Installeer of update Claude Code."))
-        }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.currentDirectoryURL = URL(fileURLWithPath: session.cwd)
-        process.arguments = [
-            "--print", "--resume", session.id,
-            "--output-format", "json", prompt
-        ]
-        var environment = ProcessInfo.processInfo.environment
-        environment["PATH"] = "\(FileManager.default.homeDirectoryForCurrentUser.path)/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-        process.environment = environment
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        do {
-            try process.run()
-            let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            process.waitUntilExit()
-            if process.terminationStatus == 0 {
-                return ResumeResult(succeeded: true, message: LF("Sessie %@ is succesvol hervat", session.id))
-            }
-            let detail = output.suffix(500).replacingOccurrences(of: "\n", with: " ")
-            return ResumeResult(succeeded: false, message: LF("Sessie %@ stopte met code %d: %@", session.id, process.terminationStatus, String(detail)))
-        } catch {
-            return ResumeResult(succeeded: false, message: LF("Kon sessie %@ niet starten: %@", session.id, error.localizedDescription))
-        }
-    }
-
-    static func executablePath() -> String? {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let candidates = ["\(home)/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]
-        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
-    }
-}
-
 enum TerminalAutomation {
     static func openAndSubmit(session: PendingSession, prompt: String) -> ResumeResult {
-        guard FileManager.default.fileExists(atPath: session.cwd) else {
-            return ResumeResult(succeeded: false, message: LF("Projectmap bestaat niet meer voor sessie %@", session.id))
-        }
-        guard let executable = ClaudeRunner.executablePath() else {
-            return ResumeResult(succeeded: false, message: L("Claude CLI niet gevonden. Installeer of update Claude Code."))
-        }
-
         let cleanPrompt = oneLine(prompt)
         if let processIdentifier = session.processIdentifier, kill(processIdentifier, 0) == 0 {
             if let tty = terminalTTY(processIdentifier: processIdentifier),
@@ -2858,19 +2806,14 @@ enum TerminalAutomation {
                 return ResumeResult(succeeded: true, message: LF("Sessie %@ is hervat in de bestaande Terminal-tab", session.id))
             }
             if isHostedByVSCode(processIdentifier: processIdentifier),
-               VSCodeTerminalAutomation.focusAndSubmit(cwd: session.cwd, prompt: cleanPrompt) {
+               VSCodeTerminalAutomation.focusAndSubmit(prompt: cleanPrompt) {
                 return ResumeResult(succeeded: true, message: LF("Sessie %@ is hervat in de bestaande VS Code-terminal", session.id))
             }
         }
-
-        let encodedPrompt = Data(cleanPrompt.utf8).base64EncodedString()
-        let promptArgument = "$(/bin/echo '\(encodedPrompt)' | /usr/bin/base64 -D)"
-        let command = "cd \(shellQuote(session.cwd)) && exec \(shellQuote(executable)) --resume \(shellQuote(session.id)) \"\(promptArgument)\""
-        let script = "tell application \"Terminal\"\nactivate\ndo script \"\(appleScriptEscape(command))\"\nend tell"
-        guard runAppleScript(script) == 0 else {
-            return ResumeResult(succeeded: false, message: LF("Kon sessie %@ niet in Terminal openen", session.id))
-        }
-        return ResumeResult(succeeded: true, message: LF("Sessie %@ is geopend in een nieuw Terminal-venster", session.id))
+        return ResumeResult(
+            succeeded: false,
+            message: L("Er draait geen Claude CLI-sessie. Start claude in Terminal of de VS Code-terminal.")
+        )
     }
 
     private static func sendToMacTerminal(tty: String, prompt: String) -> Bool {
@@ -2956,10 +2899,6 @@ enum TerminalAutomation {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private static func shellQuote(_ value: String) -> String {
-        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
-    }
-
     private static func appleScriptEscape(_ value: String) -> String {
         value.replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
@@ -2969,14 +2908,7 @@ enum TerminalAutomation {
 }
 
 enum VSCodeTerminalAutomation {
-    static func focusAndSubmit(cwd: String, prompt: String) -> Bool {
-        let code = "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
-        guard FileManager.default.isExecutableFile(atPath: code) else { return false }
-        let opener = Process()
-        opener.executableURL = URL(fileURLWithPath: code)
-        opener.arguments = ["-r", cwd]
-        try? opener.run()
-        opener.waitUntilExit()
+    static func focusAndSubmit(prompt: String) -> Bool {
         guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: "com.microsoft.VSCode").first else { return false }
         app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
         Thread.sleep(forTimeInterval: 0.8)
@@ -3029,40 +2961,6 @@ enum VSCodeAccessibilityAutomation {
         operationLock.lock()
         defer { operationLock.unlock() }
 
-        let code = "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
-        guard FileManager.default.isExecutableFile(atPath: code) else {
-            return ResumeResult(succeeded: false, message: L("Visual Studio Code is niet gevonden"))
-        }
-        let project = Process()
-        project.executableURL = URL(fileURLWithPath: code)
-        project.arguments = [session.cwd]
-        do {
-            try project.run()
-            project.waitUntilExit()
-        } catch {
-            return ResumeResult(succeeded: false, message: L("Kon het VS Code-project niet activeren"))
-        }
-
-        Thread.sleep(forTimeInterval: 1)
-        var components = URLComponents()
-        components.scheme = "vscode"
-        components.host = "anthropic.claude-code"
-        components.path = "/open"
-        components.queryItems = [URLQueryItem(name: "session", value: session.id)]
-        guard let url = components.url else {
-            return ResumeResult(succeeded: false, message: L("Kon de Claude-chat niet selecteren"))
-        }
-        let opener = Process()
-        opener.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        opener.arguments = [url.absoluteString]
-        do {
-            try opener.run()
-            opener.waitUntilExit()
-        } catch {
-            return ResumeResult(succeeded: false, message: L("Kon de Claude-chat niet openen"))
-        }
-        Thread.sleep(forTimeInterval: 1.5)
-
         let trusted: Bool
         if requestPermission {
             let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
@@ -3073,6 +2971,22 @@ enum VSCodeAccessibilityAutomation {
         guard trusted else {
             return ResumeResult(succeeded: false, message: L("Toegankelijkheidstoegang is niet ingeschakeld"))
         }
+        guard FileManager.default.fileExists(atPath: "/Applications/Visual Studio Code.app") else {
+            return ResumeResult(succeeded: false, message: L("Visual Studio Code is niet gevonden"))
+        }
+
+        var components = URLComponents()
+        components.scheme = "vscode"
+        components.host = "anthropic.claude-code"
+        components.path = "/open"
+        components.queryItems = [URLQueryItem(name: "session", value: session.id)]
+        guard let url = components.url else {
+            return ResumeResult(succeeded: false, message: L("Kon de Claude-chat niet selecteren"))
+        }
+        guard NSWorkspace.shared.open(url) else {
+            return ResumeResult(succeeded: false, message: L("Kon de Claude-chat niet openen"))
+        }
+        Thread.sleep(forTimeInterval: 1.5)
         guard postText(prompt) else {
             return ResumeResult(succeeded: false, message: L("Kon het bericht niet via Toegankelijkheid invullen"))
         }
