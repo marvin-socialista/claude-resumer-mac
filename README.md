@@ -13,6 +13,8 @@ It covers four sources:
 
 The app uses the macOS Accessibility API to focus the right window, fill the resume prompt, and press Enter. Claude CLI sessions are resumed only through an existing Terminal or VS Code terminal process. Claude Resumer never starts a Claude process itself and never opens a project directory itself.
 
+It lives in the menu bar. Every open VS Code and CLI session is listed, so you can pick in advance which ones get resumed once they hit a limit.
+
 > Not affiliated with or endorsed by Anthropic. Claude Resumer never bypasses Claude's permission prompts or safety checks.
 
 ## How resuming works

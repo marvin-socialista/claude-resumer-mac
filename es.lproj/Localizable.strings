@@ -248,3 +248,10 @@
 
 /* Sparkle auto-update */
 "Controleer op updates…" = "Buscar actualizaciones…";
+"%d open, %d wachtend, %d geselecteerd" = "%d abiertas, %d en espera, %d seleccionadas";
+"Geen open Claude CLI-sessies" = "No hay sesiones de Claude CLI abiertas";
+"Geen open VS Code Extension-chats" = "No hay chats de Extensión de VS Code abiertos";
+"Open sessies verschijnen hier automatisch, zodat je ze vooraf kunt selecteren." = "Las sesiones abiertas aparecen aquí automáticamente para que puedas seleccionarlas de antemano.";
+"Scherm blijft aan tot de wachtende sessies zijn hervat" = "La pantalla permanece encendida hasta que se reanuden las sesiones en espera";
+"Kon het scherm niet aan houden: %@" = "No se pudo mantener la pantalla encendida: %@";
+"Scherm mag weer uit" = "La pantalla puede volver a apagarse";

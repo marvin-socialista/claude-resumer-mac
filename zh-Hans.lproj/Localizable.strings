@@ -248,3 +248,10 @@
 
 /* Sparkle auto-update */
 "Controleer op updates…" = "检查更新…";
+"%d open, %d wachtend, %d geselecteerd" = "%d 个打开，%d 个等待中，已选择 %d 个";
+"Geen open Claude CLI-sessies" = "没有打开的 Claude CLI 会话";
+"Geen open VS Code Extension-chats" = "没有打开的 VS Code 扩展聊天";
+"Open sessies verschijnen hier automatisch, zodat je ze vooraf kunt selecteren." = "打开的会话会自动显示在这里，方便你提前选择。";
+"Scherm blijft aan tot de wachtende sessies zijn hervat" = "屏幕将保持开启，直到等待中的会话恢复";
+"Kon het scherm niet aan houden: %@" = "无法保持屏幕开启：%@";
+"Scherm mag weer uit" = "屏幕可以再次关闭";

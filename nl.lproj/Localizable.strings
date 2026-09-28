@@ -253,3 +253,10 @@
 "Koffie kopen" = "Koffie kopen";
 "Later" = "Later";
 "Je draait een gratis build vanuit de broncode. Claude Resumer is gemaakt door één ontwikkelaar. Vind je het nuttig, overweeg dan een kleine bijdrage via Buy Me a Coffee." = "Je draait een gratis build vanuit de broncode. Claude Resumer is gemaakt door één ontwikkelaar. Vind je het nuttig, overweeg dan een kleine bijdrage via Buy Me a Coffee.";
+"%d open, %d wachtend, %d geselecteerd" = "%d open, %d wachtend, %d geselecteerd";
+"Geen open Claude CLI-sessies" = "Geen open Claude CLI-sessies";
+"Geen open VS Code Extension-chats" = "Geen open VS Code-extensie-chats";
+"Open sessies verschijnen hier automatisch, zodat je ze vooraf kunt selecteren." = "Open sessies verschijnen hier automatisch, zodat je ze vooraf kunt selecteren.";
+"Scherm blijft aan tot de wachtende sessies zijn hervat" = "Scherm blijft aan tot de wachtende sessies zijn hervat";
+"Kon het scherm niet aan houden: %@" = "Kon het scherm niet aan houden: %@";
+"Scherm mag weer uit" = "Scherm mag weer uit";

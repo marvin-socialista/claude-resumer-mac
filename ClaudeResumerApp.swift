@@ -36,7 +36,8 @@ struct PendingSession: Identifiable, Hashable {
     let key: String
     let title: String
     let cwd: String
-    let resetDate: Date
+    // nil: de sessie staat open maar heeft (nog) geen limiet geraakt.
+    let resetDate: Date?
     let resetLabel: String
     let origin: SessionOrigin
     let processIdentifier: Int32?
@@ -380,10 +381,13 @@ final class ResumerModel: ObservableObject {
     private var closedLidTimer: Timer?
     private var hasStarted = false
     private var wakeProcess: Process?
+    // Houdt het scherm aan zolang een geselecteerde sessie op een reset wacht. Anders
+    // gaat het scherm op slot en komen de hervat-toetsaanslagen niet in VS Code aan.
+    private var displayWakeProcess: Process?
     private var closedLidStateURL: URL?
     private var closedLidStopURL: URL?
     private var handled: [String: String]
-    @Published private var excludedCodeSessionKeys: Set<String>
+    @Published private var excludedCodeSessionIDs: Set<String>
     @Published private var selectedClaudeChatIDs: Set<String>
     @Published private var selectedClaudeAppCodeIDs: Set<String>
     private var lastClaudeAppChatCount = -1
@@ -450,7 +454,8 @@ final class ResumerModel: ObservableObject {
             ? L("Ga door met de taak vanaf waar je werd onderbroken.")
             : savedPrompt!
         self.handled = defaults.dictionary(forKey: "handled") as? [String: String] ?? [:]
-        self.excludedCodeSessionKeys = Set(defaults.stringArray(forKey: "excludedCodeSessionKeys") ?? [])
+        // Per sessie-ID, zodat een keuze voor een open sessie blijft gelden zodra die een limiet raakt.
+        self.excludedCodeSessionIDs = Set(defaults.stringArray(forKey: "excludedCodeSessionIDs") ?? [])
         self.selectedClaudeChatIDs = Set(defaults.stringArray(forKey: "selectedClaudeChatIDs") ?? [])
         self.selectedClaudeAppCodeIDs = Set(defaults.stringArray(forKey: "selectedClaudeAppCodeIDs") ?? [])
         refreshLicenseStatus()
@@ -508,21 +513,26 @@ final class ResumerModel: ObservableObject {
             let claudeAppCodeResult = ClaudeAppCodeScanner.scan(resetDate: claudeAppResult.resetDate)
             let availability = RuntimeAvailability.detect()
             await MainActor.run {
-                self.sessions = found.sorted { $0.resetDate < $1.resetDate }
+                // Wachtende sessies eerst (vroegste reset bovenaan), daarna de open sessies.
+                self.sessions = found.sorted {
+                    ($0.resetDate ?? .distantFuture, $0.title) < ($1.resetDate ?? .distantFuture, $1.title)
+                }
                 self.updateClaudeApp(result: claudeAppResult)
                 self.updateClaudeAppCode(sessions: claudeAppCodeResult)
                 self.updateRuntimeAvailability(availability)
                 self.updateDetectionHealth(unrecognizedLimits: scan.unrecognizedLimits)
+                self.updateDisplayWakeLock(sessions: found)
                 self.isScanning = false
                 if self.isEnabled && self.hasAccess {
                     let now = Date()
-                    for session in found where
-                        now.timeIntervalSince(session.resetDate) >= self.gracePeriod &&
-                        now.timeIntervalSince(session.resetDate) < 86_400 &&
-                        !handledKeys.contains(session.key) &&
-                        self.isCodeSessionSelected(session) &&
-                        now.timeIntervalSince(self.lastAttempts[session.key] ?? .distantPast) >= 300 &&
-                        !self.runningSessionIDs.contains(session.id) {
+                    for session in found {
+                        guard let resetDate = session.resetDate,
+                              now.timeIntervalSince(resetDate) >= self.gracePeriod,
+                              now.timeIntervalSince(resetDate) < 86_400,
+                              !handledKeys.contains(session.key),
+                              self.isCodeSessionSelected(session),
+                              now.timeIntervalSince(self.lastAttempts[session.key] ?? .distantPast) >= 300,
+                              !self.runningSessionIDs.contains(session.id) else { continue }
                         self.resume(session)
                     }
                     self.resumeSelectedClaudeAppChats(now: now)
@@ -599,13 +609,13 @@ final class ResumerModel: ObservableObject {
     }
 
     func isCodeSessionSelected(_ session: PendingSession) -> Bool {
-        !excludedCodeSessionKeys.contains(session.key)
+        !excludedCodeSessionIDs.contains(session.id)
     }
 
     func setCodeSession(_ session: PendingSession, selected: Bool) {
-        if selected { excludedCodeSessionKeys.remove(session.key) }
-        else { excludedCodeSessionKeys.insert(session.key) }
-        UserDefaults.standard.set(Array(excludedCodeSessionKeys), forKey: "excludedCodeSessionKeys")
+        if selected { excludedCodeSessionIDs.remove(session.id) }
+        else { excludedCodeSessionIDs.insert(session.id) }
+        UserDefaults.standard.set(Array(excludedCodeSessionIDs), forKey: "excludedCodeSessionIDs")
     }
 
     func sessions(for source: ChatSource) -> [PendingSession] {
@@ -732,6 +742,34 @@ final class ResumerModel: ObservableObject {
             if wakeProcess?.isRunning == true { wakeProcess?.terminate() }
             wakeProcess = nil
             wakeLockActive = false
+        }
+    }
+
+    private func updateDisplayWakeLock(sessions found: [PendingSession]) {
+        let now = Date()
+        let awaitingResume = found.contains { session in
+            guard let resetDate = session.resetDate else { return false }
+            return isCodeSessionSelected(session)
+                && !handled.keys.contains(session.key)
+                && now.timeIntervalSince(resetDate) < 86_400
+        }
+        let wanted = keepMacAwake && isEnabled && awaitingResume
+        let running = displayWakeProcess?.isRunning == true
+        if wanted && !running {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
+            process.arguments = ["-d", "-i", "-w", String(getpid())]
+            do {
+                try process.run()
+                displayWakeProcess = process
+                addLog(L("Scherm blijft aan tot de wachtende sessies zijn hervat"))
+            } catch {
+                addLog(LF("Kon het scherm niet aan houden: %@", error.localizedDescription))
+            }
+        } else if !wanted && running {
+            displayWakeProcess?.terminate()
+            displayWakeProcess = nil
+            addLog(L("Scherm mag weer uit"))
         }
     }
 
@@ -975,7 +1013,7 @@ final class ResumerModel: ObservableObject {
             addLog(L("Hervatten geblokkeerd: activeer eerst een licentie"))
             return
         }
-        guard Date() >= session.resetDate else { return }
+        guard let resetDate = session.resetDate, Date() >= resetDate else { return }
         handled.removeValue(forKey: session.key)
         lastAttempts.removeValue(forKey: session.key)
         saveHandled()
@@ -1248,6 +1286,8 @@ enum SessionScanner {
     private struct RuntimeSession {
         let origin: SessionOrigin
         let processIdentifier: Int32
+        let cwd: String?
+        let name: String?
     }
 
     private struct InitialMetadata {
@@ -1261,6 +1301,9 @@ enum SessionScanner {
         let minute: Int
         let ampm: String
         let zone: String?
+        // Alleen bij de weeklimiet: "resets Sep 15 at 5am" noemt ook de datum.
+        var month: Int? = nil
+        var day: Int? = nil
     }
 
     struct ScanResult {
@@ -1276,7 +1319,7 @@ enum SessionScanner {
     // surrounding wording: it anchors on "resets", accepts an optional "at",
     // optional minutes, "am"/"pm" with or without periods, and an optional zone.
     private static let limitPattern =
-        #"resets\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?\b(?:\s*\(([^)]+)\))?"#
+        #"resets\s+(?:([a-z]{3,9})\.?\s+(\d{1,2})\s+)?(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?\b(?:\s*\(([^)]+)\))?"#
 
     static func findPendingSessions() -> ScanResult {
         let root = FileManager.default.homeDirectoryForCurrentUser
@@ -1287,6 +1330,7 @@ enum SessionScanner {
 
         let runtimes = runtimeSessions()
         var sessions: [PendingSession] = []
+        var transcripts: [String: URL] = [:]
         var unrecognized = 0
         for folder in projectFolders {
             guard let files = try? FileManager.default.contentsOfDirectory(
@@ -1295,13 +1339,46 @@ enum SessionScanner {
                 options: [.skipsHiddenFiles]
             ) else { continue }
             for file in files where file.pathExtension == "jsonl" {
+                transcripts[file.deletingPathExtension().lastPathComponent] = file
                 guard isRecent(file) else { continue }
                 let outcome = parseTail(file, runtimes: runtimes)
                 if let session = outcome.session { sessions.append(session) }
                 if outcome.unrecognized { unrecognized += 1 }
             }
         }
+        sessions += openSessions(runtimes: runtimes, transcripts: transcripts, excluding: Set(sessions.map(\.id)))
         return ScanResult(sessions: sessions, unrecognizedLimits: unrecognized)
+    }
+
+    // Sessies die nu open staan in VS Code of de CLI, maar geen limiet hebben.
+    // Ze worden getoond zodat je ze vooraf kunt (de)selecteren; hervat worden ze
+    // pas als ze later een limiet raken.
+    private static func openSessions(
+        runtimes: [String: RuntimeSession],
+        transcripts: [String: URL],
+        excluding pendingIDs: Set<String>
+    ) -> [PendingSession] {
+        runtimes.compactMap { sessionID, runtime in
+            guard !pendingIDs.contains(sessionID),
+                  runtime.origin != .unknown,
+                  kill(runtime.processIdentifier, 0) == 0 || errno == EPERM else { return nil }
+            let transcript = transcripts[sessionID]
+            let metadata = transcript.map(initialMetadata(of:)) ?? InitialMetadata()
+            guard let cwd = runtime.cwd ?? transcript.flatMap(originalCWD(of:)) else { return nil }
+            let genericTitle = runtime.origin == .cli
+                ? LF("Claude CLI-chat %@", String(sessionID.prefix(8)))
+                : LF("VS Code-chat %@", String(sessionID.prefix(8)))
+            return PendingSession(
+                id: sessionID,
+                key: "\(sessionID):open",
+                title: metadata.title ?? metadata.firstPrompt.map(shortTitle) ?? runtime.name ?? genericTitle,
+                cwd: cwd,
+                resetDate: nil,
+                resetLabel: "",
+                origin: runtime.origin,
+                processIdentifier: runtime.processIdentifier
+            )
+        }
     }
 
     private static func isRecent(_ file: URL) -> Bool {
@@ -1391,7 +1468,9 @@ enum SessionScanner {
             let entrypoint = object["entrypoint"] as? String ?? ""
             sessions[sessionID] = RuntimeSession(
                 origin: sessionOrigin(entrypoint),
-                processIdentifier: processNumber.int32Value
+                processIdentifier: processNumber.int32Value,
+                cwd: object["cwd"] as? String,
+                name: object["name"] as? String
             )
         }
         return sessions
@@ -1475,11 +1554,18 @@ enum SessionScanner {
             guard let range = Range(result.range(at: index), in: text) else { return nil }
             return String(text[range])
         }
-        guard let hourText = capture(1), let hour = Int(hourText),
-              let ampm = capture(3) else { return nil }
-        let minute = capture(2).flatMap(Int.init) ?? 0
-        let zone = capture(4)?.trimmingCharacters(in: .whitespaces)
-        return LimitMatch(hour: hour, minute: minute, ampm: ampm, zone: zone)
+        guard let hourText = capture(3), let hour = Int(hourText),
+              let ampm = capture(5) else { return nil }
+        let minute = capture(4).flatMap(Int.init) ?? 0
+        let zone = capture(6)?.trimmingCharacters(in: .whitespaces)
+        var match = LimitMatch(hour: hour, minute: minute, ampm: ampm, zone: zone)
+        if let monthText = capture(1), let dayText = capture(2), let day = Int(dayText) {
+            let names = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+            guard let index = names.firstIndex(of: String(monthText.lowercased().prefix(3))) else { return nil }
+            match.month = index + 1
+            match.day = day
+        }
+        return match
     }
 
     private static func resetDate(match: LimitMatch, timestamp: String) -> Date? {
@@ -1493,6 +1579,16 @@ enum SessionScanner {
         parts.hour = hour
         parts.minute = match.minute
         parts.second = 0
+        if let month = match.month, let day = match.day {
+            parts.month = month
+            parts.day = day
+            guard var reset = calendar.date(from: parts) else { return nil }
+            // Datum rond de jaarwisseling (limiet in december, reset in januari).
+            if reset < event.addingTimeInterval(-86_400) {
+                reset = calendar.date(byAdding: .year, value: 1, to: reset) ?? reset
+            }
+            return reset
+        }
         guard var reset = calendar.date(from: parts) else { return nil }
         if reset <= event { reset = calendar.date(byAdding: .day, value: 1, to: reset) ?? reset }
         return reset
@@ -3115,8 +3211,6 @@ struct ContentView: View {
                 }.frame(width: 58, height: 58).shadow(color: .indigo.opacity(0.18), radius: 16, y: 8)
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Claude Resumer").font(.largeTitle.weight(.semibold))
-                    Text("Kies welke VS Code-, Claude App-, App Code- en CLI-sessies doorgaan")
-                        .foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button { model.showHelp = true } label: {
@@ -3150,6 +3244,28 @@ struct ContentView: View {
                 .padding(16)
                 .background(.orange.opacity(0.14), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(.orange.opacity(0.8), lineWidth: 2))
+            }
+
+            // Een banner in plaats van een alert: een alert is een apart venster, en een
+            // klik daarop sluit het menubalkpaneel voordat de knop reageert.
+            if model.showCoffeePopup {
+                HStack(spacing: 12) {
+                    Image(systemName: "cup.and.saucer.fill").font(.title2).foregroundStyle(.brown)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(L("Trakteer de maker op een koffie")).font(.headline)
+                        Text(L("Je draait een gratis build vanuit de broncode. Claude Resumer is gemaakt door één ontwikkelaar. Vind je het nuttig, overweeg dan een kleine bijdrage via Buy Me a Coffee."))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button(L("Later")) { model.showCoffeePopup = false }
+                    Button(L("Koffie kopen")) {
+                        if let url = URL(string: coffeeURLString) { NSWorkspace.shared.open(url) }
+                        model.showCoffeePopup = false
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .padding(14)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
 
             if model.detectionStale {
@@ -3268,14 +3384,6 @@ struct ContentView: View {
         }
         .sheet(isPresented: $model.showClosedLidWarning) {
             ClosedLidWarningView().environmentObject(model)
-        }
-        .alert(L("Trakteer de maker op een koffie"), isPresented: $model.showCoffeePopup) {
-            Button(L("Koffie kopen")) {
-                if let url = URL(string: coffeeURLString) { NSWorkspace.shared.open(url) }
-            }
-            Button(L("Later"), role: .cancel) {}
-        } message: {
-            Text(L("Je draait een gratis build vanuit de broncode. Claude Resumer is gemaakt door één ontwikkelaar. Vind je het nuttig, overweeg dan een kleine bijdrage via Buy Me a Coffee."))
         }
     }
 }
@@ -3508,7 +3616,12 @@ struct CodeChatSelectionView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text(LF("%d wachtend, %d geselecteerd", visibleSessions.count, model.selectedSessionCount(in: source)))
+                Text(LF(
+                    "%d open, %d wachtend, %d geselecteerd",
+                    visibleSessions.count,
+                    visibleSessions.filter { $0.resetDate != nil }.count,
+                    model.selectedSessionCount(in: source)
+                ))
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("Alles") { model.selectAllSessions(in: source, selected: true) }.buttonStyle(.plain)
@@ -3517,8 +3630,8 @@ struct CodeChatSelectionView: View {
             if visibleSessions.isEmpty {
                 EmptyChatState(
                     icon: "checkmark.circle",
-                    title: source == .cli ? "Geen wachtende Claude CLI-sessies" : "Geen wachtende VS Code Extension-chats",
-                    detail: "Nieuwe limietmeldingen verschijnen hier automatisch."
+                    title: source == .cli ? "Geen open Claude CLI-sessies" : "Geen open VS Code Extension-chats",
+                    detail: "Open sessies verschijnen hier automatisch, zodat je ze vooraf kunt selecteren."
                 )
             } else {
                 ScrollView {
@@ -3846,7 +3959,10 @@ struct SessionRow: View {
     @EnvironmentObject var model: ResumerModel
     let session: PendingSession
 
-    private func isDue(at date: Date) -> Bool { date >= session.resetDate }
+    private func isDue(at date: Date) -> Bool {
+        guard let resetDate = session.resetDate else { return false }
+        return date >= resetDate
+    }
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 5)) { timeline in
@@ -3863,14 +3979,16 @@ struct SessionRow: View {
             .labelsHidden()
             .toggleStyle(.checkbox)
             .help(L("Automatisch hervatten"))
-            Image(systemName: isDue ? "play.circle.fill" : "clock.fill")
-                .font(.title2).foregroundStyle(isDue ? .green : .orange)
+            Image(systemName: session.resetDate == nil ? "bubble.left.fill" : (isDue ? "play.circle.fill" : "clock.fill"))
+                .font(.title2)
+                .foregroundStyle(session.resetDate == nil ? Color.secondary : (isDue ? Color.green : Color.orange))
             VStack(alignment: .leading, spacing: 3) {
                 Text(session.title).font(.headline)
                 Text("\(session.origin.label) · \(URL(fileURLWithPath: session.cwd).lastPathComponent)")
                     .font(.subheadline).foregroundStyle(.secondary)
                 Text(session.cwd).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                Text(LF("Reset: %@", session.resetLabel)).font(.caption)
+                Text(session.resetDate == nil ? L("Nog geen actieve limiet gedetecteerd") : LF("Reset: %@", session.resetLabel))
+                    .font(.caption)
             }
             Spacer()
             if model.runningSessionIDs.contains(session.id) {
@@ -3978,58 +4096,20 @@ struct ClaudeAppCodeSessionRow: View {
     }
 }
 
-struct MenuBarView: View {
-    @EnvironmentObject var model: ResumerModel
+struct MenuBarFooter: View {
     @EnvironmentObject var updater: UpdaterController
-    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if model.closedLidModeEnabled {
-                Label("GESLOTEN MODUS INGESCHAKELD", systemImage: "exclamationmark.triangle.fill")
-                    .font(.headline.weight(.heavy))
-                    .foregroundStyle(.orange)
-                Text(model.closedLidModeMessage).font(.caption)
-                Button("Gesloten modus nu uitschakelen") { model.disableClosedLidMode() }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.orange)
-                Divider()
-            }
-            Text(L(model.isEnabled && model.hasAccess ? "Automatisch hervatten is actief" : "Automatisch hervatten staat niet actief"))
-                .font(.headline)
-            Text(model.licenseTitle).font(.caption).foregroundStyle(.secondary)
-            Text(LF(
-                "%d VS Code-chats, %d CLI-sessies, %d App-chats, %d App Code-sessies",
-                model.sessions(for: .code).count,
-                model.sessions(for: .cli).count,
-                model.claudeAppChats.count,
-                model.claudeAppCodeSessions.count
-            ))
-                .foregroundStyle(.secondary)
-            Divider()
-            Button("Open Claude Resumer") {
-                openWindow(id: "main")
-                NSApp.activate(ignoringOtherApps: true)
-            }
-            Button("Nu controleren") { model.scan() }
-            Toggle("Houd Mac wakker", isOn: $model.keepMacAwake)
-            if !model.closedLidModeEnabled {
-                Button("Gesloten modus instellen...") {
-                    openWindow(id: "main")
-                    NSApp.activate(ignoringOtherApps: true)
-                    model.showClosedLidWarning = true
-                }
-            }
-            Button("Help en uitleg") {
-                openWindow(id: "main")
-                NSApp.activate(ignoringOtherApps: true)
-                model.showHelp = true
-            }
+        HStack {
             Button(L("Controleer op updates…")) { updater.checkForUpdates() }
                 .disabled(!updater.canCheckForUpdates)
-            Divider()
+            Spacer()
             Button("Stop Claude Resumer") { NSApplication.shared.terminate(nil) }
-        }.padding(12).frame(width: 270)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
     }
 }
 
@@ -4049,8 +4129,28 @@ final class UpdaterController: ObservableObject {
     }
 }
 
+/// De app leeft in de menubalk: geen Dock-icoon en geen venster bij het opstarten.
+/// Het hoofdvenster opent alleen op verzoek; zolang het open is, staat de app tijdelijk
+/// in het Dock en in Cmd-Tab, zodat het venster normaal te vinden is.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
+        // SwiftUI opent het WindowGroup-venster automatisch bij de start; sluit dat meteen.
+        DispatchQueue.main.async {
+            for window in NSApp.windows where window.identifier?.rawValue.hasPrefix("main") == true {
+                window.close()
+            }
+        }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        false
+    }
+}
+
 @main
 struct ClaudeResumerApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var model = ResumerModel()
     @StateObject private var updater = UpdaterController()
 
@@ -4059,7 +4159,13 @@ struct ClaudeResumerApp: App {
             ContentView()
                 .environmentObject(model)
                 .environmentObject(updater)
-                .onAppear { model.start(); model.offerCoffeeIfNeeded() }
+                .onAppear {
+                    model.start()
+                    model.offerCoffeeIfNeeded()
+                    NSApp.setActivationPolicy(.regular)
+                    NSApp.activate(ignoringOtherApps: true)
+                }
+                .onDisappear { NSApp.setActivationPolicy(.accessory) }
                 .onOpenURL { model.handleIncomingURL($0) }
         }
         .defaultSize(width: 820, height: 820)
@@ -4071,9 +4177,21 @@ struct ClaudeResumerApp: App {
         }
 
         MenuBarExtra {
-            MenuBarView().environmentObject(model).environmentObject(updater)
+            // De volledige interface, direct onder het menubalkicoon.
+            VStack(spacing: 0) {
+                // Geen titelbalk in het paneel, dus zelf ruimte boven de kop.
+                ContentView().padding(.top, 4)
+                Divider()
+                MenuBarFooter()
+            }
+            .frame(width: 800, height: 780)
+            .background(Color(nsColor: .windowBackgroundColor))
+            .environmentObject(model)
+            .environmentObject(updater)
         } label: {
             Image(systemName: model.closedLidModeEnabled ? "exclamationmark.triangle.fill" : (model.isEnabled ? "clock.arrow.circlepath" : "clock.badge.xmark"))
+                // Het menubalkicoon verschijnt direct bij de start, ook zonder venster.
+                .task { model.start() }
         }
         .menuBarExtraStyle(.window)
     }
