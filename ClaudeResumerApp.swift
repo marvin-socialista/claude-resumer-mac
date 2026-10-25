@@ -20,8 +20,11 @@ private func deviceIdentifier() -> String {
 }
 
 private func L(_ key: String) -> String {
-    let localized = Bundle.main.localizedString(forKey: key, value: nil, table: nil)
-    if localized != key { return localized }
+    // Een eigen markering voor "ontbreekt", niet de sleutel zelf: de sleutels zijn Nederlands,
+    // dus in nl is de vertaling gelijk aan de sleutel, en dan viel alles terug op Engels.
+    let missing = "\u{1}"
+    let localized = Bundle.main.localizedString(forKey: key, value: missing, table: nil)
+    if localized != missing { return localized }
     guard let path = Bundle.main.path(forResource: "en", ofType: "lproj"),
           let englishBundle = Bundle(path: path) else { return key }
     return englishBundle.localizedString(forKey: key, value: key, table: nil)
@@ -46,12 +49,16 @@ struct PendingSession: Identifiable, Hashable {
 enum SessionOrigin: String, Hashable {
     case vscode
     case cli
+    // Code-sessies in Claude App (entrypoint claude-desktop). Die worden via
+    // ClaudeAppCodeScanner getoond en hervat, nooit via VS Code of de terminal.
+    case claudeApp
     case unknown
 
     var label: String {
         switch self {
         case .vscode: return "VS Code Extension"
         case .cli: return "Claude CLI"
+        case .claudeApp: return "Claude App Code"
         case .unknown: return "VS Code Extension"
         }
     }
@@ -505,9 +512,18 @@ final class ResumerModel: ObservableObject {
         let handledKeys = Set(handled.keys)
         Task.detached {
             let scan = SessionScanner.findPendingSessions()
-            let found = scan.sessions
+            // Code-sessies uit Claude App horen niet in de VS Code- of CLI-lijst: hun
+            // limiet gaat naar ClaudeAppCodeScanner, die ze via Claude App hervat.
+            let found = scan.sessions.filter { $0.origin != .claudeApp }
+            var codeLimits: [String: Date] = [:]
+            for session in scan.sessions where session.origin == .claudeApp {
+                if let resetDate = session.resetDate { codeLimits[session.id] = resetDate }
+            }
             let claudeAppResult = ClaudeAppScanner.scan()
-            let claudeAppCodeResult = ClaudeAppCodeScanner.scan(resetDate: claudeAppResult.resetDate)
+            let claudeAppCodeResult = ClaudeAppCodeScanner.scan(
+                resetDate: claudeAppResult.resetDate,
+                transcriptLimits: codeLimits
+            )
             let availability = RuntimeAvailability.detect()
             await MainActor.run {
                 // Wachtende sessies eerst (vroegste reset bovenaan), daarna de open sessies.
@@ -1330,7 +1346,7 @@ enum SessionScanner {
     ) -> [PendingSession] {
         runtimes.compactMap { sessionID, runtime in
             guard !pendingIDs.contains(sessionID),
-                  runtime.origin != .unknown,
+                  runtime.origin == .vscode || runtime.origin == .cli,
                   kill(runtime.processIdentifier, 0) == 0 || errno == EPERM else { return nil }
             let transcript = transcripts[sessionID]
             let metadata = transcript.map(initialMetadata(of:)) ?? InitialMetadata()
@@ -1473,6 +1489,7 @@ enum SessionScanner {
 
     private static func sessionOrigin(_ entrypoint: String) -> SessionOrigin {
         let value = entrypoint.lowercased()
+        if value == "claude-desktop" { return .claudeApp }
         if value.contains("vscode") || value.contains("ide") { return .vscode }
         if value == "cli" || value.contains("terminal") { return .cli }
         return .unknown
@@ -2131,7 +2148,76 @@ enum ClaudeAppCodeScanner {
     private static let bundleIdentifier = "com.anthropic.claudefordesktop"
     private static let storedKey = "claudeAppCodeVisibleSessions"
 
-    static func scan(resetDate: Date?) -> [ClaudeAppCodeSession] {
+    /// `transcriptLimits`: resettijd per Claude Code-sessie-id, voor sessies waarvan de
+    /// eigen transcriptie op een limiet eindigt.
+    static func scan(resetDate: Date?, transcriptLimits: [String: Date]) -> [ClaudeAppCodeSession] {
+        let local = localSessions(fallbackResetDate: resetDate, transcriptLimits: transcriptLimits)
+        let localTitles = Set(local.map { $0.title.lowercased() })
+        let others = sidebarSessions(resetDate: resetDate)
+            .filter { !localTitles.contains($0.title.lowercased()) }
+            .map {
+                ClaudeAppCodeSession(
+                    id: $0.id,
+                    title: $0.title,
+                    titleOccurrence: $0.titleOccurrence,
+                    resetDate: $0.resetDate,
+                    recencyRank: $0.recencyRank > Int.max - local.count ? Int.max : $0.recencyRank + local.count
+                )
+            }
+        return local + others
+    }
+
+    /// Lokale Code-sessies: Claude App bewaart er per sessie een JSON-bestand van, met
+    /// titel en het id van de Claude Code-transcriptie. Werkt ook als de Code-zijbalk niet
+    /// in beeld is; de oude route via de zijbalk vond voor veel gebruikers niets (issue #2).
+    private static func localSessions(fallbackResetDate: Date?, transcriptLimits: [String: Date]) -> [ClaudeAppCodeSession] {
+        let root = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Claude/claude-code-sessions", isDirectory: true)
+        guard let enumerator = FileManager.default.enumerator(
+            at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+        ) else { return [] }
+        let cutoff = Date().addingTimeInterval(-30 * 86_400)
+        var records: [(id: String, title: String, cliSessionID: String?, lastActivity: Date)] = []
+        for case let url as URL in enumerator
+        where url.pathExtension == "json" && url.lastPathComponent.hasPrefix("local_") {
+            guard let data = try? Data(contentsOf: url),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let id = object["sessionId"] as? String,
+                  let title = (object["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !title.isEmpty,
+                  object["isArchived"] as? Bool != true else { continue }
+            let milliseconds = ((object["lastActivityAt"] ?? object["createdAt"]) as? NSNumber)?.doubleValue ?? 0
+            let lastActivity = Date(timeIntervalSince1970: milliseconds / 1_000)
+            guard lastActivity >= cutoff else { continue }
+            records.append((id, title, object["cliSessionId"] as? String, lastActivity))
+        }
+
+        var occurrences: [String: Int] = [:]
+        return records.sorted { $0.lastActivity > $1.lastActivity }.prefix(30).enumerated().map { rank, record in
+            let key = record.title.lowercased()
+            let occurrence = occurrences[key, default: 0]
+            occurrences[key] = occurrence + 1
+            // De eigen transcriptie zegt of deze sessie op een limiet wacht. Alleen zonder
+            // gekoppelde transcriptie geldt de gedeelde limiet van Claude App.
+            let resetDate: Date?
+            if let cliSessionID = record.cliSessionID {
+                resetDate = transcriptLimits[cliSessionID]
+            } else {
+                resetDate = fallbackResetDate
+            }
+            return ClaudeAppCodeSession(
+                id: record.id,
+                title: record.title,
+                titleOccurrence: occurrence,
+                resetDate: resetDate,
+                recencyRank: rank
+            )
+        }
+    }
+
+    /// Cloudsessies hebben geen lokaal bestand. Die komen uit de cache van Claude App, en
+    /// alleen zolang ze zichtbaar zijn in de Code-zijbalk.
+    private static func sidebarSessions(resetDate: Date?) -> [ClaudeAppCodeSession] {
         let records = cachedCodeSessions()
         if AXIsProcessTrusted(),
            let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first {
@@ -3828,7 +3914,7 @@ struct HelpView: View {
             Text("Goed om te weten").font(.headline)
             Text(L("Claude kan nog steeds om toestemming of extra informatie vragen. Claude Resumer schakelt geen beveiligingscontroles uit en kan een taak niet voltooien wanneer menselijke invoer nodig is."))
                 .foregroundStyle(.secondary)
-            Text(L("Met ‘Houd Mac wakker’ voorkom je alleen automatische sluimerstand terwijl de app draait. Het beeldscherm kan wel uitgaan. De aparte geavanceerde gesloten modus kan slaap bij dichtklappen voorkomen, gebruikt Low Power Mode wanneer de klep dicht is en stopt op batterij automatisch bij 10%."))
+            Text(L("Met ‘Houd Mac wakker’ voorkom je automatische sluimerstand terwijl de app draait, en blijft het beeldscherm aan zodat het niet op slot gaat. De aparte geavanceerde gesloten modus kan slaap bij dichtklappen voorkomen, gebruikt Low Power Mode wanneer de klep dicht is en stopt op batterij automatisch bij 10%."))
                 .foregroundStyle(.secondary)
             Text(L("De gesloten modus gebruikt een niet door Apple gedocumenteerde pmset-instelling en vereist beheerdersrechten. Gebruik een actieve, dichtgeklapte Mac nooit in een tas of op een zachte ondergrond. Bij openen, uitschakelen of stoppen van de app worden je eerdere energie-instellingen hersteld."))
                 .foregroundStyle(.secondary)

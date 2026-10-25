@@ -29,8 +29,8 @@
         <string>zh-Hans</string>
         <string>ru</string>
     </array>
-    <key>CFBundleShortVersionString</key><string>1.7.5</string>
-    <key>CFBundleVersion</key><string>16</string>
+    <key>CFBundleShortVersionString</key><string>1.7.6</string>
+    <key>CFBundleVersion</key><string>17</string>
     <key>LicensingEnabled</key><false/>
     <key>LicenseServerURL</key><string></string>
     <key>PurchaseURL</key><string></string>
