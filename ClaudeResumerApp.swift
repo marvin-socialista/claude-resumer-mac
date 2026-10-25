@@ -381,9 +381,6 @@ final class ResumerModel: ObservableObject {
     private var closedLidTimer: Timer?
     private var hasStarted = false
     private var wakeProcess: Process?
-    // Houdt het scherm aan zolang een geselecteerde sessie op een reset wacht. Anders
-    // gaat het scherm op slot en komen de hervat-toetsaanslagen niet in VS Code aan.
-    private var displayWakeProcess: Process?
     private var closedLidStateURL: URL?
     private var closedLidStopURL: URL?
     private var handled: [String: String]
@@ -521,7 +518,6 @@ final class ResumerModel: ObservableObject {
                 self.updateClaudeAppCode(sessions: claudeAppCodeResult)
                 self.updateRuntimeAvailability(availability)
                 self.updateDetectionHealth(unrecognizedLimits: scan.unrecognizedLimits)
-                self.updateDisplayWakeLock(sessions: found)
                 self.isScanning = false
                 if self.isEnabled && self.hasAccess {
                     let now = Date()
@@ -728,7 +724,9 @@ final class ResumerModel: ObservableObject {
             }
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
-            process.arguments = ["-i", "-w", String(getpid())]
+            // -d houdt ook het scherm aan: gaat het scherm uit, dan gaat het op slot en
+            // komen de hervat-toetsaanslagen niet meer in VS Code of Claude aan.
+            process.arguments = ["-d", "-i", "-w", String(getpid())]
             do {
                 try process.run()
                 wakeProcess = process
@@ -742,34 +740,6 @@ final class ResumerModel: ObservableObject {
             if wakeProcess?.isRunning == true { wakeProcess?.terminate() }
             wakeProcess = nil
             wakeLockActive = false
-        }
-    }
-
-    private func updateDisplayWakeLock(sessions found: [PendingSession]) {
-        let now = Date()
-        let awaitingResume = found.contains { session in
-            guard let resetDate = session.resetDate else { return false }
-            return isCodeSessionSelected(session)
-                && !handled.keys.contains(session.key)
-                && now.timeIntervalSince(resetDate) < 86_400
-        }
-        let wanted = keepMacAwake && isEnabled && awaitingResume
-        let running = displayWakeProcess?.isRunning == true
-        if wanted && !running {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
-            process.arguments = ["-d", "-i", "-w", String(getpid())]
-            do {
-                try process.run()
-                displayWakeProcess = process
-                addLog(L("Scherm blijft aan tot de wachtende sessies zijn hervat"))
-            } catch {
-                addLog(LF("Kon het scherm niet aan houden: %@", error.localizedDescription))
-            }
-        } else if !wanted && running {
-            displayWakeProcess?.terminate()
-            displayWakeProcess = nil
-            addLog(L("Scherm mag weer uit"))
         }
     }
 
@@ -3201,6 +3171,7 @@ struct ContentView: View {
             ).ignoresSafeArea()
             Circle().fill(Color.purple.opacity(0.10)).frame(width: 360).blur(radius: 70).offset(x: 330, y: -270)
 
+            ScrollViewReader { scroller in
             ScrollView {
             VStack(alignment: .leading, spacing: 16) {
             HStack {
@@ -3222,6 +3193,9 @@ struct ContentView: View {
                 Button { model.scan() } label: {
                     Label("Vernieuwen", systemImage: "arrow.clockwise")
                 }.disabled(model.isScanning)
+                Button { NSApplication.shared.terminate(nil) } label: {
+                    Label("Afsluiten", systemImage: "power")
+                }.help(L("Stop Claude Resumer"))
             }
 
             if model.closedLidModeEnabled {
@@ -3305,7 +3279,7 @@ struct ContentView: View {
                 Toggle("Houd Mac wakker zolang Claude Resumer actief is", isOn: $model.keepMacAwake)
                 if model.keepMacAwake {
                     Label(
-                        L(model.wakeLockActive ? "Sluimerstand wordt voorkomen, het beeldscherm mag wel uitgaan." : "De wakkerhoudfunctie kon niet worden gestart."),
+                        L(model.wakeLockActive ? "Sluimerstand wordt voorkomen en het scherm blijft aan, zodat het niet op slot gaat." : "De wakkerhoudfunctie kon niet worden gestart."),
                         systemImage: model.wakeLockActive ? "sun.max.fill" : "exclamationmark.triangle.fill"
                     )
                     .font(.caption)
@@ -3329,10 +3303,15 @@ struct ContentView: View {
                     } else if model.closedLidModeEnabled {
                         Button("Uitschakelen") { model.disableClosedLidMode() }
                             .buttonStyle(.bordered)
-                    } else {
+                    } else if !model.showClosedLidWarning {
                         Button("Instellen...") { model.showClosedLidWarning = true }
                             .buttonStyle(.bordered)
                     }
+                }
+                // De waarschuwing klapt hier open in plaats van als sheet: een klik in een
+                // sheet sloot het menubalkpaneel, en de sheet ging mee.
+                if model.showClosedLidWarning && !model.closedLidModeEnabled && !model.closedLidModeTransitioning {
+                    ClosedLidWarningView().id("closedLidWarning")
                 }
                 if model.closedLidModeTransitioning || model.closedLidModeMessage != L("Gesloten modus staat uit.") {
                     Label(
@@ -3374,41 +3353,47 @@ struct ContentView: View {
             }
             .padding(22)
             }
+            // Schuif mee naar de opengeklapte waarschuwing, zodat vinkje en knop in beeld staan.
+            .onChange(of: model.showClosedLidWarning) { shown in
+                guard shown else { return }
+                DispatchQueue.main.async {
+                    withAnimation { scroller.scrollTo("closedLidWarning", anchor: .bottom) }
+                }
+            }
+            }
         }
         .frame(minWidth: 780, minHeight: 760)
-        .sheet(isPresented: $model.showHelp) {
-            HelpView().environmentObject(model)
-        }
-        .sheet(isPresented: $model.showLicense) {
-            LicenseView().environmentObject(model)
-        }
-        .sheet(isPresented: $model.showClosedLidWarning) {
-            ClosedLidWarningView().environmentObject(model)
+        .overlay {
+            if model.showHelp {
+                InScreenDialog(onDismiss: { model.showHelp = false }) { HelpView() }
+            } else if model.showLicense {
+                InScreenDialog(onDismiss: { model.showLicense = false }) { LicenseView() }
+            }
         }
     }
 }
 
 struct ClosedLidWarningView: View {
     @EnvironmentObject var model: ResumerModel
-    @Environment(\.dismiss) private var dismiss
     @State private var hasConfirmed = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack(alignment: .top, spacing: 14) {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 12) {
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 34))
+                    .font(.title)
                     .foregroundStyle(.orange)
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 3) {
                     Text("Waarschuwing: gesloten MacBook-modus")
-                        .font(.title2.bold())
+                        .font(.headline)
                     Text("Lees dit voordat je de beveiligde slaapstand van macOS aanpast.")
                         .foregroundStyle(.secondary)
                 }
             }
 
             Text("Deze geavanceerde functie gebruikt de niet door Apple gedocumenteerde instelling ‘pmset disablesleep’. Je MacBook blijft hierdoor werken wanneer je hem dichtklapt.")
-                .font(.body.weight(.medium))
+                .font(.subheadline.weight(.medium))
+                .fixedSize(horizontal: false, vertical: true)
 
             VStack(alignment: .leading, spacing: 12) {
                 WarningPoint(
@@ -3433,6 +3418,7 @@ struct ClosedLidWarningView: View {
                 )
             }
             .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .background(.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
 
             Toggle("Ik begrijp dat mijn Mac actief en mogelijk warm blijft terwijl hij dichtgeklapt is.", isOn: $hasConfirmed)
@@ -3444,23 +3430,20 @@ struct ClosedLidWarningView: View {
                 .foregroundStyle(.secondary)
 
             HStack {
-                Button("Annuleren") { dismiss() }
+                Button("Annuleren") { model.showClosedLidWarning = false }
                     .keyboardShortcut(.cancelAction)
                 Spacer()
                 Button("Inschakelen met beheerdersrechten") {
-                    dismiss()
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                        model.enableClosedLidMode()
-                    }
+                    model.showClosedLidWarning = false
+                    model.enableClosedLidMode()
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.orange)
                 .disabled(!hasConfirmed)
             }
         }
-        .padding(26)
-        .frame(width: 620)
-        .interactiveDismissDisabled(model.closedLidModeTransitioning)
+        .padding(16)
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(.orange.opacity(0.6), lineWidth: 1))
     }
 }
 
@@ -3475,6 +3458,7 @@ struct WarningPoint: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(L(title)).font(.subheadline.bold())
                 Text(L(text)).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -3822,7 +3806,6 @@ struct LicenseStatusCard: View {
 
 struct HelpView: View {
     @EnvironmentObject var model: ResumerModel
-    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -3833,7 +3816,7 @@ struct HelpView: View {
                     Text("Van limietmelding naar automatisch hervatte chat").foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("Gereed") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Gereed") { model.showHelp = false }.keyboardShortcut(.cancelAction)
             }
 
             HelpSection(icon: "eye.fill", title: "1. Detectie blijft lokaal op je Mac", text: "Voor de VS Code-extensie en CLI leest de app ~/.claude/projects. Voor Claude App gebruikt hij lokale appgegevens en de zichtbare chat- en Code-sessies. Cookies en accounttokens worden niet uitgelezen.")
@@ -3858,8 +3841,8 @@ struct HelpView: View {
                 }
                 Spacer()
                 Button("Licentie en proefperiode") {
-                    dismiss()
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { model.showLicense = true }
+                    model.showHelp = false
+                    model.showLicense = true
                 }.buttonStyle(.borderedProminent)
             }
         }
@@ -3886,7 +3869,6 @@ struct HelpSection: View {
 
 struct LicenseView: View {
     @EnvironmentObject var model: ResumerModel
-    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -3896,7 +3878,7 @@ struct LicenseView: View {
                     Text(model.licenseDetail).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("Gereed") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Gereed") { model.showLicense = false }.keyboardShortcut(.cancelAction)
             }
 
             HStack(spacing: 12) {
@@ -4126,6 +4108,30 @@ final class UpdaterController: ObservableObject {
 
     func checkForUpdates() {
         controller.updater.checkForUpdates()
+    }
+}
+
+/// Toont help of licentie als kaart over het scherm, in hetzelfde venster. Een sheet of
+/// apart venster werkt niet in het menubalkpaneel: een klik daarin sluit het paneel, of het
+/// paneel blijft erboven liggen en dekt het venster af.
+struct InScreenDialog<Content: View>: View {
+    let onDismiss: () -> Void
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.4)
+                .ignoresSafeArea()
+                .onTapGesture(perform: onDismiss)
+            ViewThatFits(in: .vertical) {
+                content
+                ScrollView { content }
+            }
+            .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(.white.opacity(0.12)))
+            .shadow(color: .black.opacity(0.35), radius: 30, y: 12)
+            .padding(16)
+        }
     }
 }
 

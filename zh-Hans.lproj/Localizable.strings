@@ -31,6 +31,7 @@
 "Kies welke Claude Code- en Claude App-chats na de limiet doorgaan" = "选择达到限额后要继续的 Claude Code 和 Claude App 聊天";
 "Help" = "帮助";
 "Vernieuwen" = "刷新";
+"Afsluiten" = "退出";
 "GESLOTEN MODUS INGESCHAKELD" = "合盖模式已启用";
 "Nu uitschakelen" = "立即关闭";
 "Detecteert" = "检测";
@@ -252,6 +253,4 @@
 "Geen open Claude CLI-sessies" = "没有打开的 Claude CLI 会话";
 "Geen open VS Code Extension-chats" = "没有打开的 VS Code 扩展聊天";
 "Open sessies verschijnen hier automatisch, zodat je ze vooraf kunt selecteren." = "打开的会话会自动显示在这里，方便你提前选择。";
-"Scherm blijft aan tot de wachtende sessies zijn hervat" = "屏幕将保持开启，直到等待中的会话恢复";
-"Kon het scherm niet aan houden: %@" = "无法保持屏幕开启：%@";
-"Scherm mag weer uit" = "屏幕可以再次关闭";
+"Sluimerstand wordt voorkomen en het scherm blijft aan, zodat het niet op slot gaat." = "已阻止闲置睡眠，屏幕保持开启，因此不会锁定。";

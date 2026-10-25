@@ -31,6 +31,7 @@
 "Kies welke Claude Code- en Claude App-chats na de limiet doorgaan" = "Выберите, какие чаты Claude Code и Claude App продолжать после лимита";
 "Help" = "Справка";
 "Vernieuwen" = "Обновить";
+"Afsluiten" = "Выйти";
 "GESLOTEN MODUS INGESCHAKELD" = "РЕЖИМ ЗАКРЫТОЙ КРЫШКИ ВКЛЮЧЁН";
 "Nu uitschakelen" = "Выключить сейчас";
 "Detecteert" = "Обнаруживает";
@@ -252,6 +253,4 @@
 "Geen open Claude CLI-sessies" = "Нет открытых сеансов Claude CLI";
 "Geen open VS Code Extension-chats" = "Нет открытых чатов расширения VS Code";
 "Open sessies verschijnen hier automatisch, zodat je ze vooraf kunt selecteren." = "Открытые сеансы появляются здесь автоматически, чтобы их можно было выбрать заранее.";
-"Scherm blijft aan tot de wachtende sessies zijn hervat" = "Экран останется включённым, пока ожидающие сеансы не будут возобновлены";
-"Kon het scherm niet aan houden: %@" = "Не удалось оставить экран включённым: %@";
-"Scherm mag weer uit" = "Экран снова может выключаться";
+"Sluimerstand wordt voorkomen en het scherm blijft aan, zodat het niet op slot gaat." = "Режим сна отключён, экран остаётся включённым и не блокируется.";

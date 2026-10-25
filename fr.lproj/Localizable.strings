@@ -31,6 +31,7 @@
 "Kies welke Claude Code- en Claude App-chats na de limiet doorgaan" = "Choisissez les chats Claude Code et Claude App qui continuent après la limite";
 "Help" = "Aide";
 "Vernieuwen" = "Actualiser";
+"Afsluiten" = "Quitter";
 "GESLOTEN MODUS INGESCHAKELD" = "MODE FERMÉ ACTIVÉ";
 "Nu uitschakelen" = "Désactiver maintenant";
 "Detecteert" = "Détecte";
@@ -252,6 +253,4 @@
 "Geen open Claude CLI-sessies" = "Aucune session Claude CLI ouverte";
 "Geen open VS Code Extension-chats" = "Aucun chat Extension VS Code ouvert";
 "Open sessies verschijnen hier automatisch, zodat je ze vooraf kunt selecteren." = "Les sessions ouvertes apparaissent ici automatiquement pour que vous puissiez les sélectionner à l'avance.";
-"Scherm blijft aan tot de wachtende sessies zijn hervat" = "L'écran reste allumé jusqu'à la reprise des sessions en attente";
-"Kon het scherm niet aan houden: %@" = "Impossible de garder l'écran allumé : %@";
-"Scherm mag weer uit" = "L'écran peut de nouveau s'éteindre";
+"Sluimerstand wordt voorkomen en het scherm blijft aan, zodat het niet op slot gaat." = "La veille est empêchée et l’écran reste allumé, il ne se verrouille donc pas.";
