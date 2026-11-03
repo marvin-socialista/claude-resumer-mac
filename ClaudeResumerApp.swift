@@ -511,20 +511,25 @@ final class ResumerModel: ObservableObject {
         isScanning = true
         let handledKeys = Set(handled.keys)
         Task.detached {
-            let scan = SessionScanner.findPendingSessions()
-            // Code-sessies uit Claude App horen niet in de VS Code- of CLI-lijst: hun
-            // limiet gaat naar ClaudeAppCodeScanner, die ze via Claude App hervat.
-            let found = scan.sessions.filter { $0.origin != .claudeApp }
-            var codeLimits: [String: Date] = [:]
-            for session in scan.sessions where session.origin == .claudeApp {
-                if let resetDate = session.resetDate { codeLimits[session.id] = resetDate }
+            // Eigen autoreleasepool: zonder bleven de tijdelijke JSON-objecten van elke
+            // scan op de achtergrondthread hangen en groeide het geheugen tot honderden MB.
+            let (scan, found, claudeAppResult, claudeAppCodeResult, availability) = autoreleasepool {
+                let scan = SessionScanner.findPendingSessions()
+                // Code-sessies uit Claude App horen niet in de VS Code- of CLI-lijst: hun
+                // limiet gaat naar ClaudeAppCodeScanner, die ze via Claude App hervat.
+                let found = scan.sessions.filter { $0.origin != .claudeApp }
+                var codeLimits: [String: Date] = [:]
+                for session in scan.sessions where session.origin == .claudeApp {
+                    if let resetDate = session.resetDate { codeLimits[session.id] = resetDate }
+                }
+                let claudeAppResult = ClaudeAppScanner.scan()
+                let claudeAppCodeResult = ClaudeAppCodeScanner.scan(
+                    resetDate: claudeAppResult.resetDate,
+                    transcriptLimits: codeLimits
+                )
+                let availability = RuntimeAvailability.detect()
+                return (scan, found, claudeAppResult, claudeAppCodeResult, availability)
             }
-            let claudeAppResult = ClaudeAppScanner.scan()
-            let claudeAppCodeResult = ClaudeAppCodeScanner.scan(
-                resetDate: claudeAppResult.resetDate,
-                transcriptLimits: codeLimits
-            )
-            let availability = RuntimeAvailability.detect()
             await MainActor.run {
                 // Wachtende sessies eerst (vroegste reset bovenaan), daarna de open sessies.
                 self.sessions = found.sorted {
@@ -566,7 +571,7 @@ final class ResumerModel: ObservableObject {
 
     func refreshRuntimeAvailability() {
         Task.detached {
-            let availability = RuntimeAvailability.detect()
+            let availability = autoreleasepool { RuntimeAvailability.detect() }
             let claudeRunning = !NSRunningApplication.runningApplications(
                 withBundleIdentifier: "com.anthropic.claudefordesktop"
             ).isEmpty
@@ -1318,21 +1323,28 @@ enum SessionScanner {
         var sessions: [PendingSession] = []
         var transcripts: [String: URL] = [:]
         var unrecognized = 0
+        var recentPaths: Set<String> = []
         for folder in projectFolders {
             guard let files = try? FileManager.default.contentsOfDirectory(
                 at: folder,
-                includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+                includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey],
                 options: [.skipsHiddenFiles]
             ) else { continue }
             for file in files where file.pathExtension == "jsonl" {
                 transcripts[file.deletingPathExtension().lastPathComponent] = file
                 guard isRecent(file) else { continue }
+                recentPaths.insert(file.path)
                 let outcome = parseTail(file, runtimes: runtimes)
                 if let session = outcome.session { sessions.append(session) }
                 if outcome.unrecognized { unrecognized += 1 }
             }
         }
         sessions += openSessions(runtimes: runtimes, transcripts: transcripts, excluding: Set(sessions.map(\.id)))
+        // Drop memo entries for transcripts that aged out or were deleted.
+        let transcriptPaths = Set(transcripts.values.map(\.path))
+        tailMemo.prune(keeping: recentPaths)
+        metadataMemo.prune(keeping: transcriptPaths)
+        cwdMemo.prune(keeping: transcriptPaths)
         return ScanResult(sessions: sessions, unrecognizedLimits: unrecognized)
     }
 
@@ -1373,18 +1385,106 @@ enum SessionScanner {
         return Date().timeIntervalSince(modified) < 172_800
     }
 
+    /// Size and modification date of a transcript. An unchanged stamp means the parse
+    /// result from the previous scan still holds, so the file is not read again.
+    private struct FileStamp: Equatable {
+        let size: Int
+        let modified: Date
+
+        init?(_ file: URL) {
+            guard let values = try? file.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]),
+                  let size = values.fileSize,
+                  let modified = values.contentModificationDate else { return nil }
+            self.size = size
+            self.modified = modified
+        }
+    }
+
+    /// Per-file parse results, keyed by path and valid while the file stamp is unchanged.
+    /// Without it every scan (once a minute) re-read up to 6 MB per recent transcript and
+    /// parsed every line as JSON, which kept the app at hundreds of MB.
+    private final class FileMemo<Value> {
+        private let lock = NSLock()
+        private var entries: [String: (stamp: FileStamp, value: Value)] = [:]
+
+        func value(for file: URL, compute: () -> Value) -> Value {
+            guard let stamp = FileStamp(file) else { return compute() }
+            let key = file.path
+            lock.lock()
+            let hit = entries[key]
+            lock.unlock()
+            if let hit, hit.stamp == stamp { return hit.value }
+            let value = compute()
+            lock.lock()
+            entries[key] = (stamp, value)
+            lock.unlock()
+            return value
+        }
+
+        func prune(keeping paths: Set<String>) {
+            lock.lock()
+            entries = entries.filter { paths.contains($0.key) }
+            lock.unlock()
+        }
+    }
+
+    /// The last rate limit in a transcript tail, before runtime info is applied.
+    private struct TailLimit {
+        let sessionID: String
+        let timestamp: String
+        let reset: Date
+        let label: String
+        let cwd: String
+        let title: String?
+        let origin: SessionOrigin
+    }
+
+    private struct TailSummary {
+        var limit: TailLimit?
+        var unrecognized = false
+    }
+
+    private static let tailMemo = FileMemo<TailSummary>()
+    private static let metadataMemo = FileMemo<InitialMetadata>()
+    private static let cwdMemo = FileMemo<String?>()
+    private static let rateLimitMarker = Data("rate_limit".utf8)
+
     private static func parseTail(_ file: URL, runtimes: [String: RuntimeSession]) -> (session: PendingSession?, unrecognized: Bool) {
-        let initial = initialMetadata(of: file)
-        guard let handle = try? FileHandle(forReadingFrom: file) else { return (nil, false) }
+        let summary = tailMemo.value(for: file) { autoreleasepool { summarizeTail(file) } }
+        guard let limit = summary.limit else { return (nil, summary.unrecognized) }
+        var origin = limit.origin
+        let runtime = runtimes[limit.sessionID]
+        if let runtime, runtime.origin != .unknown { origin = runtime.origin }
+        let genericTitle = origin == .cli
+            ? LF("Claude CLI-chat %@", String(limit.sessionID.prefix(8)))
+            : LF("VS Code-chat %@", String(limit.sessionID.prefix(8)))
+        let session = PendingSession(
+            id: limit.sessionID,
+            key: "\(limit.sessionID):\(limit.timestamp)",
+            title: limit.title ?? genericTitle,
+            cwd: limit.cwd,
+            resetDate: limit.reset,
+            resetLabel: limit.label,
+            origin: origin,
+            processIdentifier: runtime?.processIdentifier
+        )
+        return (session, summary.unrecognized)
+    }
+
+    private static func summarizeTail(_ file: URL) -> TailSummary {
+        guard let handle = try? FileHandle(forReadingFrom: file) else { return TailSummary() }
         defer { try? handle.close() }
         let end = (try? handle.seekToEnd()) ?? 0
         let maxBytes: UInt64 = 4 * 1_024 * 1_024
         let start = end > maxBytes ? end - maxBytes : 0
         try? handle.seek(toOffset: start)
+        // Most transcripts never hit a limit: skip JSON-parsing those altogether.
         guard let data = try? handle.readToEnd(),
-              let text = String(data: data, encoding: .utf8) else { return (nil, false) }
+              data.range(of: rateLimitMarker) != nil,
+              let text = String(data: data, encoding: .utf8) else { return TailSummary() }
 
-        var lastLimit: PendingSession?
+        let initial = initialMetadata(of: file)
+        var lastLimit: TailLimit?
         var laterActivity = false
         var sawUnparsedLimit = false
         var latestTitle = initial.title
@@ -1407,22 +1507,14 @@ enum SessionScanner {
                    let reset = resetDate(match: match, timestamp: timestamp) {
                     let sessionID = entry["sessionId"] as? String ?? file.deletingPathExtension().lastPathComponent
                     guard let cwd = originalCWD(of: file) ?? entry["cwd"] as? String else { continue }
-                    let runtime = runtimes[sessionID]
-                    if let runtime, runtime.origin != .unknown { origin = runtime.origin }
-                    let label = format(reset, zone: match.zone)
-                    let fallbackTitle = initial.firstPrompt.map(shortTitle)
-                    let genericTitle = origin == .cli
-                        ? LF("Claude CLI-chat %@", String(sessionID.prefix(8)))
-                        : LF("VS Code-chat %@", String(sessionID.prefix(8)))
-                    lastLimit = PendingSession(
-                        id: sessionID,
-                        key: "\(sessionID):\(timestamp)",
-                        title: latestTitle ?? fallbackTitle ?? genericTitle,
+                    lastLimit = TailLimit(
+                        sessionID: sessionID,
+                        timestamp: timestamp,
+                        reset: reset,
+                        label: format(reset, zone: match.zone),
                         cwd: cwd,
-                        resetDate: reset,
-                        resetLabel: label,
-                        origin: origin,
-                        processIdentifier: runtime?.processIdentifier
+                        title: latestTitle ?? initial.firstPrompt.map(shortTitle),
+                        origin: origin
                     )
                     laterActivity = false
                     sawUnparsedLimit = false
@@ -1435,7 +1527,7 @@ enum SessionScanner {
                 laterActivity = true
             }
         }
-        return (laterActivity ? nil : lastLimit, sawUnparsedLimit && !laterActivity)
+        return TailSummary(limit: laterActivity ? nil : lastLimit, unrecognized: sawUnparsedLimit && !laterActivity)
     }
 
     private static func runtimeSessions() -> [String: RuntimeSession] {
@@ -1463,6 +1555,10 @@ enum SessionScanner {
     }
 
     private static func initialMetadata(of file: URL) -> InitialMetadata {
+        metadataMemo.value(for: file) { autoreleasepool { readInitialMetadata(of: file) } }
+    }
+
+    private static func readInitialMetadata(of file: URL) -> InitialMetadata {
         guard let handle = try? FileHandle(forReadingFrom: file) else { return InitialMetadata() }
         defer { try? handle.close() }
         guard let data = try? handle.read(upToCount: 2 * 1_024 * 1_024),
@@ -1503,6 +1599,10 @@ enum SessionScanner {
     }
 
     private static func originalCWD(of file: URL) -> String? {
+        cwdMemo.value(for: file) { autoreleasepool { readOriginalCWD(of: file) } }
+    }
+
+    private static func readOriginalCWD(of file: URL) -> String? {
         guard let handle = try? FileHandle(forReadingFrom: file) else { return nil }
         defer { try? handle.close() }
         let data = try? handle.read(upToCount: 256 * 1_024)
